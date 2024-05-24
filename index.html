@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MTG Card Entry</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        background: #333;
+        color: #ccc;
+      }
+
+      .content {
+        width: 800px;
+        margin: 3rem auto;
+      }
+
+      label {
+        display: block;
+        margin: 2rem 0 1rem;
+        font-size: 1.3rem;
+      }
+
+      select {
+        height: 10rem;
+        width: 100%;
+      }
+
+      input {
+        font-size: 1.2rem;
+      }
+
+      .decklist {
+        width: 100%;
+        height: 20rem;
+        font-size: 1.2rem;
+      }
+
+      input,
+      select,
+      textarea {
+        background: #222;
+        color: #ccc;
+        border: 1px solid #666;
+
+        &[disabled] {
+          opacity: 0.3;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="content">
+      <h2>MTG Card Entry</h2>
+      <p>
+        This is a small app designed for very fast data entry of MTG cards by collector number or
+        name. I can easily enter around 100 cards in 5 minutes. Helpful keybindings:
+      </p>
+
+      <ul>
+        <li>
+          <code>Enter</code>: add the selected card to your deck. Note than entering 3 digits (for a
+          collector number) will automatically add the card.
+        </li>
+        <li>
+          <code>ArrowUp</code>/<code>ArrowDown</code> or
+          <code>NumpadAdd</code>/<code>NumpadSubtract</code>: increase or decrease the quantity of
+          the last card added.
+        </li>
+        <li>
+          <code>[</code> or <code>NumpadMultiply</code>: cycle through finishes of the last card
+          (e.g. foil/etched)
+        </li>
+        <li><code>]</code> or <code>NumpadDivide</code>: cycle through select sets</li>
+        <li><code>?</code>: toggle speech confirmation (sound on!)</li>
+      </ul>
+
+      <label for="set-select">Select set</label>
+      <select id="set-select" class="set-select" disabled multiple></select>
+      <label for="cn-input" class="cn-label">Name/Collector Number</label>
+      <div class="input-wrapper">
+        <input id="cn-input" class="cn-input" autocomplete="off" type="search" disabled />
+        <span class="picked-card"></span>
+      </div>
+
+      <h2>Decklist</h2>
+      <textarea class="decklist"></textarea>
+      <button class="clear-button">Clear</button>
+    </div>
+
+    <script>
+      const $setSelect = document.querySelector('.set-select');
+      const $cnInput = document.querySelector('.cn-input');
+      const $cnLabel = document.querySelector('.cn-label');
+      const $pickedCard = document.querySelector('.picked-card');
+      const $decklist = document.querySelector('.decklist');
+      const $clear = document.querySelector('.clear-button');
+
+      /** @type {string} */
+      let currentSet;
+      let pickedCard;
+      let sets = new Map();
+      /** @type {{ card: Card; finish: string }} */
+      const pickedCards = JSON.parse(localStorage.getItem('cards')) || [];
+      let announce = localStorage.getItem('announce') !== 'false';
+
+      renderList();
+
+      $setSelect.addEventListener(
+        'change',
+        debounce(async () => {
+          $cnInput.disabled = true;
+
+          const setCodes = getSelectedSetCodes();
+          if (setCodes.length === 0) {
+            return;
+          }
+
+          const results = await Promise.all(
+            setCodes.map((code) =>
+              fetchAllSetCards(code).then((value) => {
+                if (getSelectedSetCodes().join() !== setCodes.join()) {
+                  return;
+                }
+
+                return { value, code };
+              }),
+            ),
+          );
+
+          sets.clear();
+          for (const result of results) {
+            sets.set(result.code, result.value);
+          }
+
+          $cnInput.disabled = false;
+          $cnInput.focus();
+
+          setCurrentSet(results[0].code);
+        }, 500),
+      );
+
+      $cnInput.addEventListener('keyup', () => {
+        const cn = Number($cnInput.value.trim());
+        if (isNaN(cn)) {
+          let best = 0;
+          for (const card of sets.get(currentSet)) {
+            const name = card.name.toLowerCase();
+            const input = $cnInput.value.toLowerCase();
+            const lcs = longestCommonSubstring(name, input);
+            if (lcs.length > best) {
+              best = lcs.length;
+              pickedCard = card;
+            }
+          }
+        } else {
+          pickedCard = sets.get(currentSet).find((card) => card.collector_number == cn);
+          if (pickedCard && $cnInput.value.length === 3) {
+            submit();
+          }
+        }
+
+        $pickedCard.textContent = pickedCard ? pickedCard.name : 'No match found';
+      });
+
+      $cnInput.addEventListener('keydown', (e) => {
+        const last = pickedCards[pickedCards.length - 1];
+        if (event.code === 'Enter' || event.code === 'NumpadEnter') {
+          submit();
+        } else if (event.code === 'ArrowUp' || event.code === 'NumpadAdd') {
+          if (last) {
+            pickedCards.push({ ...last });
+            say(`${last.card.name}, ${last.finish}`);
+            renderList();
+          }
+        } else if (event.code === 'ArrowDown' || event.code === 'NumpadSubtract') {
+          pickedCards.pop();
+          say(`removed ${last.card.name}`);
+          renderList();
+        } else if (event.code === 'BracketLeft' || event.code === 'NumpadMultiply') {
+          if (pickedCards.length) {
+            const finishIndex = last.card.finishes.indexOf(last.finish);
+            last.finish = last.card.finishes[(finishIndex + 1) % last.card.finishes.length];
+            say(last.finish);
+            renderList();
+          }
+        } else if (event.code === 'BracketRight' || event.code === 'NumpadDivide') {
+          const allSets = [...sets.keys()];
+          const currentIndex = allSets.indexOf(currentSet);
+          const next = allSets[(currentIndex + 1) % allSets.length];
+          setCurrentSet(next);
+          say(next.toUpperCase());
+        } else if (event.key === '?') {
+          announce = !announce;
+          say(announce ? 'Voice on' : 'Voice off', true);
+          localStorage.setItem('announce', announce);
+        } else {
+          return;
+        }
+
+        localStorage.setItem('cards', JSON.stringify(pickedCards));
+        e.preventDefault();
+      });
+
+      $clear.addEventListener('click', () => {
+        pickedCards.length = 0;
+        localStorage.removeItem('cards');
+        renderList();
+      });
+
+      function say(text, force = false) {
+        if (force || announce) {
+          const u = new SpeechSynthesisUtterance(text);
+          u.rate = 2;
+          speechSynthesis.speak(u);
+        }
+      }
+
+      function submit() {
+        if (pickedCard) {
+          const finish = pickedCard.finishes.includes('nonfoil')
+            ? 'nonfoil'
+            : pickedCard.finishes[0];
+          pickedCards.push({ card: pickedCard, finish });
+          say(pickedCard.name);
+          pickedCard = undefined;
+          $cnInput.value = '';
+          renderList();
+        }
+      }
+
+      function renderList() {
+        const labelToQuantity = new Map();
+        for (const { card, finish } of pickedCards) {
+          const parts = [
+            `"${card.name}"`,
+            `"${card.set_name}"`,
+            card.set.toUpperCase(),
+            card.collector_number,
+            finish,
+          ];
+
+          const label = parts.join(',');
+          const qty = (labelToQuantity.get(label)?.qty || 0) + 1;
+          labelToQuantity.set(label, { qty, name: card.name });
+        }
+
+        $decklist.value =
+          'quantity,name,set,setcode,number,finish\n' +
+          [...labelToQuantity.entries()]
+            .sort(([, a], [, b]) => a.name.localeCompare(b.name))
+            .map(([label, { qty }]) => `${qty},${label}`)
+            .join('\n');
+      }
+
+      function getSelectedSetCodes() {
+        return Array.from($setSelect.selectedOptions).map((option) => option.value);
+      }
+
+      fetchAllSets().then((sets) => {
+        for (const set of sets) {
+          const $option = document.createElement('option');
+          $option.value = set.code;
+          $option.textContent = `${set.code.toUpperCase()}: ${set.name}`;
+          $setSelect.appendChild($option);
+        }
+        $setSelect.disabled = false;
+        $setSelect.focus();
+      });
+
+      function setCurrentSet(setCode) {
+        currentSet = setCode;
+        $cnInput.disabled = false;
+        $cnLabel.textContent = `Name/Collector Number (${setCode.toUpperCase()})`;
+        $cnInput.focus();
+      }
+
+      function fetchAllSetCards(setCode) {
+        return fetchPaginated(`https://api.scryfall.com/cards/search?q=set:${setCode}`);
+      }
+
+      function fetchAllSets() {
+        return fetchPaginated('https://api.scryfall.com/sets', true);
+      }
+
+      async function fetchPaginated(url, cache = false) {
+        let result = [];
+        do {
+          const res = await fetchJson(url, cache);
+          url = res.next_page;
+          result = result.concat(res.data);
+        } while (url);
+
+        return result;
+      }
+
+      function debounce(fn, delay) {
+        let timeout;
+        return function () {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => {
+            fn.apply(this, arguments);
+          }, delay);
+        };
+      }
+
+      function hash(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+          hash = (hash << 5) - hash + str.charCodeAt(i);
+          hash |= 0;
+        }
+        return hash;
+      }
+
+      function fetchJson(url, store) {
+        return fetch(url).then((response) => response.json());
+      }
+
+      function longestCommonSubstring(haystack, needle) {
+        let longestSubstring = '';
+        for (let i = 0; i < haystack.length; i++) {
+          for (let j = i + 1; j <= haystack.length; j++) {
+            const substring = haystack.slice(i, j);
+            if (substring.length > longestSubstring.length && needle.includes(substring)) {
+              longestSubstring = substring;
+            }
+          }
+        }
+        return longestSubstring;
+      }
+    </script>
+  </body>
+</html>
