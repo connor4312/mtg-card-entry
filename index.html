@@ -136,8 +136,6 @@
           }
 
           $cnInput.disabled = false;
-          $cnInput.focus();
-
           setCurrentSet(results[0].code);
         }, 500),
       );
@@ -157,9 +155,6 @@
           }
         } else {
           pickedCard = sets.get(currentSet).find((card) => card.collector_number == cn);
-          if (pickedCard && $cnInput.value.length === 3) {
-            submit();
-          }
         }
 
         $pickedCard.textContent = pickedCard ? pickedCard.name : 'No match found';
@@ -278,7 +273,9 @@
       }
 
       function fetchAllSetCards(setCode) {
-        return fetchPaginated(`https://api.scryfall.com/cards/search?q=set:${setCode}`);
+        return fetchPaginated(
+          `https://api.scryfall.com/cards/search?q=set:${setCode} unique:prints`,
+        );
       }
 
       function fetchAllSets() {
